@@ -1,5 +1,6 @@
 import asyncio
 from agents import Agent, ModelSettings, Runner, trace
+from tools.get_airport_locations import get_airport_locations
 from tools.get_flight_informations_by_particular_fields import get_flight_information
 from tools.get_weather_information_by_airport_station_id import get_weather_information
 from tools.resolve_airport_location import resolve_airport_location
@@ -77,6 +78,34 @@ routing_agent = Agent(
     tools=[calculate_route],
 )
 
+# ==================================================
+# Airport Locations Agent (DANH SÁCH SÂN BAY)
+# ==================================================
+airport_locations_agent = Agent(
+    name="Airport Locations Data Agent",
+    model="gpt-4o-mini",
+    instructions=(
+        "Bạn là agent CUNG CẤP DỮ LIỆU sân bay.\n"
+        "\n"
+        "VAI TRÒ DUY NHẤT:\n"
+        "- GỌI tool get_airport_locations để lấy TOÀN BỘ danh sách sân bay và tọa độ.\n"
+        "\n"
+        "QUY TẮC BẮT BUỘC:\n"
+        "1. LUÔN gọi tool get_airport_locations.\n"
+        "2. KHÔNG lọc, KHÔNG tìm sân bay cụ thể.\n"
+        "3. KHÔNG suy luận, KHÔNG diễn giải.\n"
+        "4. KHÔNG trả lời người dùng cuối.\n"
+        "5. Trả kết quả NGUYÊN DỮ LIỆU từ tool để agent khác xử lý.\n"
+        "\n"
+        "DỮ LIỆU TRẢ VỀ sẽ được agent khác sử dụng để:\n"
+        "- Tìm sân bay tương ứng\n"
+        "- Trích xuất tọa độ chính xác\n"
+        "- Tính toán routing"
+    ),
+    model_settings=ModelSettings(tool_choice="required"),
+    tools=[get_airport_locations],
+)
+
 
 # ==================================================
 # Orchestrator Agent (ĐIỀU PHỐI)
@@ -95,6 +124,7 @@ orchestrator = Agent(
         "  - Yêu cầu về chuyến bay? (sử dụng get_flight_information)\n"
         "  - Yêu cầu về thời tiết? (sử dụng get_weather_information)\n"
         "  - Yêu cầu về di chuyển mặt đất? (sử dụng resolve_airport_location + calculate_route)\n"
+        "  - Yêu cầu danh sách sân bay hoặc tọa độ hàng loạt? (sử dụng get_airport_locations)\n"
         "\n"
         "BƯỚC 2: Xử lý TẤT CẢ các yêu cầu đã xác định:\n"
         "\n"
@@ -105,13 +135,26 @@ orchestrator = Agent(
         "     → Gọi tool get_weather_information với station_id của sân bay (ví dụ: 'VVTS' cho Tân Sơn Nhất)\n"
         "\n"
         "  C) Nếu có yêu cầu di chuyển mặt đất (tính thời gian, quãng đường, ETA):\n"
-        "     a) Gọi tool resolve_airport_location với tên điểm xuất phát (ví dụ: 'sân bay Tân Sơn Nhất')\n"
-        "     b) SAU KHI có tọa độ điểm xuất phát, GỌI NGAY tool resolve_airport_location lần nữa với điểm đến (ví dụ: 'Quận 1')\n"
-        "     c) SAU KHI có tọa độ CẢ HAI điểm, GỌI NGAY tool calculate_route với:\n"
-        "        - from_latitude, from_longitude (từ điểm xuất phát)\n"
-        "        - to_latitude, to_longitude (từ điểm đến)\n"
-        "        - travel_mode='car' (nếu là ô tô)\n"
-        "        - traffic=True (nếu yêu cầu có xét giao thông)\n"
+        "       KHI CẦN TỌA ĐỘ CHO MỘT ĐIỂM, BẮT BUỘC XÁC ĐỊNH LOẠI ĐIỂM:\n"
+        "\n"
+        "  C.1) ĐIỂM LÀ SÂN BAY\n"
+        "  (ví dụ: Sân bay Tân Sơn Nhất, SGN, HAN, ICAO, airport)\n"
+        "  → TUYỆT ĐỐI KHÔNG gọi resolve_airport_location\n"
+        "  → BẮT BUỘC thực hiện ĐÚNG THỨ TỰ:\n"
+        "     1) Gọi Airport Locations Data Agent (tool get_airport_locations)\n"
+        "     2) Lấy latitude / longitude từ kết quả matching\n"
+        "\n"
+        "  C.2) ĐIỂM KHÔNG PHẢI SÂN BAY\n"
+        "  (ví dụ: quận, khách sạn, địa chỉ, POI)\n"
+        "  → BẮT BUỘC gọi tool resolve_airport_location để lấy tọa độ.\n"
+        "  C.3) SAU KHI CÓ TỌA ĐỘ CẢ HAI ĐIỂM\n"
+        "  → Gọi tool calculate_route với:\n"
+        "     - from_latitude, from_longitude\n"
+        "     - to_latitude, to_longitude\n"
+        "     - travel_mode='car' (nếu là ô tô)\n"
+        "     - traffic=True (nếu có xét giao thông)\n"
+        "\n"
+        "\n"
         "\n"
         "BƯỚC 3: Tổng hợp TẤT CẢ kết quả:\n"
         "  - Thông tin chuyến bay (nếu có)\n"
@@ -123,11 +166,21 @@ orchestrator = Agent(
         "1. BẠN PHẢI xử lý TẤT CẢ các phần trong câu hỏi. KHÔNG được bỏ sót.\n"
         "2. Nếu câu hỏi có nhiều phần (ví dụ: chuyến bay + thời tiết + di chuyển), bạn PHẢI xử lý CẢ BA.\n"
         "3. Sau mỗi tool call, bạn PHẢI kiểm tra: 'Tôi đã xử lý TẤT CẢ các yêu cầu chưa?'\n"
-        "4. Đối với di chuyển mặt đất: PHẢI gọi CẢ HAI tool resolve_airport_location TRƯỚC KHI gọi calculate_route.\n"
+        "4. Đối với di chuyển mặt đất: PHẢI gọi tool get_airport_locations để lấy tọa độ sân bay và gọi tool resolve_airport_location để lấy tọa độ điểm còn lại TRƯỚC KHI gọi calculate_route.\n"
         "5. KHÔNG được kết thúc nếu còn thiếu bất kỳ phần nào của câu hỏi.\n"
-        "6. Đọc kỹ tọa độ từ kết quả resolve_airport_location và truyền chính xác vào calculate_route.\n"
+        "6. Đọc kỹ tọa độ từ kết quả resolve_airport_location với tọa độ từ kết quả get_airport_locations và truyền chính xác vào calculate_route.\n"
         "7. Bạn có thể gọi các tool theo bất kỳ thứ tự nào, nhưng PHẢI gọi TẤT CẢ các tool cần thiết.\n"
         "\n"
+        "LUỒNG XỬ LÝ TỌA ĐỘ SÂN BAY (BẮT BUỘC):\n"
+
+        "a) Gọi Airport Locations Data Agent để lấy TOÀN BỘ danh sách sân bay và tìm sân bay phù hợp nhất\n"
+        "b) Đọc latitude / longitude từ kết quả matching\n"
+        "c) Gọi calculate_route với tọa độ đã được match\n"
+
+        "PHÂN BIỆT TRÁCH NHIỆM:\n"
+        "- Airport Locations Data Agent → LẤY DỮ LIỆU VÀ TÌM SÂN BAY TƯƠNG ỨNG\n"
+        "- calculate_route → TÍNH TOÁN\n"
+
         "VÍ DỤ: Câu hỏi có 3 phần:\n"
         "  - 'Cho tôi các chuyến bay từ A đến B' → gọi get_flight_information\n"
         "  - 'đánh giá nguy cơ delay dựa trên thời tiết' → gọi get_weather_information\n"
@@ -140,6 +193,7 @@ orchestrator = Agent(
         get_weather_information,
         resolve_airport_location,
         calculate_route,
+        get_airport_locations,
     ],  # All tools directly accessible
 )
 
